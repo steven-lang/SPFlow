@@ -8,11 +8,12 @@ Created on April 15, 2018
 from spn.algorithms.Inference import add_node_likelihood, leaf_marginalized_likelihood
 from spn.structure.leaves.parametric.Parametric import *
 from spn.structure.leaves.parametric.utils import get_scipy_obj_params
+import sys
 import logging
 
 logger = logging.getLogger(__name__)
 
-POS_EPS = 1e-7
+POS_EPS = np.finfo(float).eps
 
 
 def continuous_likelihood(node, data=None, dtype=np.float64):
@@ -40,6 +41,8 @@ def discrete_likelihood(node, data=None, dtype=np.float64):
     probs, marg_ids, observations = leaf_marginalized_likelihood(node, data, dtype)
     scipy_obj, params = get_scipy_obj_params(node)
     probs[~marg_ids] = scipy_obj.pmf(observations, **params)
+    probs[probs == 1.0] = 0.999999999
+    probs[probs == 0.0] = 0.000000001
     return probs
 
 

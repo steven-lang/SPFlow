@@ -11,8 +11,7 @@ from spn.structure.Base import Product, Sum, eval_spn_bottom_up
 
 logger = logging.getLogger(__name__)
 
-EPSILON = 0.000000000000001
-
+EPSILON = np.finfo(float).eps
 
 def leaf_marginalized_likelihood(node, data=None, dtype=np.float64):
     assert len(node.scope) == 1, node.scope
@@ -28,7 +27,10 @@ def leaf_marginalized_likelihood(node, data=None, dtype=np.float64):
 def prod_log_likelihood(node, children, data=None, dtype=np.float64):
     llchildren = np.concatenate(children, axis=1)
     assert llchildren.dtype == dtype
-    return np.sum(llchildren, axis=1).reshape(-1, 1)
+    pll = np.sum(llchildren, axis=1).reshape(-1, 1)
+    pll[np.isinf(pll)] = np.finfo(pll.dtype).min
+
+    return pll
 
 
 def prod_likelihood(node, children, data=None, dtype=np.float64):
@@ -45,7 +47,10 @@ def sum_log_likelihood(node, children, data=None, dtype=np.float64):
 
     b = np.array(node.weights, dtype=dtype)
 
-    return logsumexp(llchildren, b=b, axis=1).reshape(-1, 1)
+    sll = logsumexp(llchildren, b=b, axis=1).reshape(-1, 1)
+
+    return sll
+
 
 
 def sum_likelihood(node, children, data=None, dtype=np.float64):
@@ -66,7 +71,10 @@ _node_likelihood = {Sum: sum_likelihood, Product: prod_likelihood}
 def log_node_likelihood(node, *args, **kwargs):
     probs = _node_likelihood[type(node)](node, *args, **kwargs)
     with np.errstate(divide="ignore"):
-        return np.log(probs)
+        nll = np.log(probs)
+        nll[np.isinf(nll)] = np.finfo(nll.dtype).min
+        assert not np.any(np.isnan(nll))
+        return nll
 
 
 def add_node_likelihood(node_type, lambda_func, log_lambda_func=None):
