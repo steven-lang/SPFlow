@@ -60,7 +60,7 @@ def poisson_to_tf_graph(node, data_placeholder=None, log_space=True, variable_di
 
 def bernoulli_to_tf_graph(node, data_placeholder=None, log_space=True, variable_dict=None, dtype=np.float32):
     with tf.variable_scope("%s_%s" % (node.__class__.__name__, node.id)):
-        p = tf.maximum(tf.get_variable("p", initializer=node.p, dtype=dtype), 0.001)
+        p = tf.minimum(tf.maximum(tf.get_variable("p", initializer=node.p, dtype=dtype), 0.00000001), 0.9999999)
         variable_dict[node] = p
         dist = tf.distributions.Bernoulli(probs=p)
         if log_space:
@@ -142,7 +142,7 @@ def add_parametric_tensorflow_support():
     add_node_to_tf_graph(Gamma, gamma_to_tf_graph)
     add_node_to_tf_graph(LogNormal, lognormal_to_tf_graph)
     add_node_to_tf_graph(Poisson, poisson_to_tf_graph)
-    add_node_to_tf_graph(Bernoulli, poisson_to_tf_graph)
+    add_node_to_tf_graph(Bernoulli, bernoulli_to_tf_graph)
     add_node_to_tf_graph(Categorical, categorical_to_tf_graph)
 
     add_tf_graph_to_node(Gaussian, tf_graph_to_gaussian)
