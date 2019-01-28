@@ -105,6 +105,7 @@ def optimize_tf(
     batch_size: int = None,
     optimizer: tf.train.Optimizer = None,
     return_loss=False,
+    epoch_hook=None,
 ) -> Union[Tuple[Node, List[float]], Node]:
     """
     Optimize weights of an SPN with a tensorflow stochastic gradient descent optimizer, maximizing the likelihood
@@ -126,7 +127,7 @@ def optimize_tf(
 
     # Optimize the tensorflow graph
     loss_list = optimize_tf_graph(
-        tf_graph, variable_dict, data_placeholder, data, epochs=epochs, batch_size=batch_size, optimizer=optimizer
+        tf_graph, variable_dict, data_placeholder, data, epochs=epochs, batch_size=batch_size, optimizer=optimizer, epoch_hook=epoch_hook, spn_copy=spn_copy
     )
 
     # Return loss as well if flag is set
@@ -137,7 +138,7 @@ def optimize_tf(
 
 
 def optimize_tf_graph(
-    tf_graph, variable_dict, data_placeholder, data, epochs=1000, batch_size=None, optimizer=None
+    tf_graph, variable_dict, data_placeholder, data, epochs=1000, batch_size=None, optimizer=None, epoch_hook=None, spn_copy=None
 ) -> List[float]:
     if optimizer is None:
         optimizer = tf.train.GradientDescentOptimizer(0.001)
@@ -169,6 +170,11 @@ def optimize_tf_graph(
 
             logger.debug("Epoch: %s, Loss: %s", i, epoch_loss)
             loss_list.append(epoch_loss)
+
+            # Call epoch hook if given
+            if epoch_hook:
+                tf_graph_to_spn(variable_dict)
+                epoch_hook(i, epoch_loss, spn_copy)
 
         tf_graph_to_spn(variable_dict)
 

@@ -1,4 +1,5 @@
 import logging
+from functools import partial
 from typing import List
 
 import numpy as np
@@ -9,6 +10,7 @@ from sklearn.utils.validation import check_array, check_is_fitted
 
 from spn.algorithms.LearningWrappers import learn_classifier, learn_parametric
 from spn.algorithms.MPE import mpe
+from spn.algorithms.Statistics import get_structure_stats_dict
 from spn.gpu.TensorFlow import optimize_tf
 from spn.structure.Base import Context, get_nodes_by_type
 from spn.structure.leaves.parametric.Parametric import Categorical, Gaussian, Parametric
@@ -33,12 +35,14 @@ class SPNClassifier(BaseEstimator, ClassifierMixin):
         tf_optimizer=tf.train.AdamOptimizer(learning_rate=0.001),
         tf_pre_optimization_hook=None,
         tf_post_optimization_hook=None,
+        tf_epoch_hook=None,
+        min_instances_slice=50,
     ):
         """
         Create an SPNClassifier.
 
         :param parametric_types: Parametric types of leaf nodes. If None, all are assumed to be Gaussian
-        :param n_jobs: Number of parallel jobs for learning the SPN structure
+        n_jobs: Number of parallel jobs for learning the SPN structure
         :param tf_optimize_weights: Optimize weights in tensorflow
         :param tf_n_epochs: Number of tensorflow optimization epochs
         :param tf_batch_size: Batch size for tensorflow optimization
@@ -54,6 +58,8 @@ class SPNClassifier(BaseEstimator, ClassifierMixin):
         self.parametric_types = parametric_types
         self.tf_pre_optimization_hook = tf_pre_optimization_hook
         self.tf_post_optimization_hook = tf_post_optimization_hook
+        self.min_instances_slice = min_instances_slice
+        self.tf_epoch_hook = tf_epoch_hook
 
     def fit(self, X, y):
         # Check that X and y have correct shape
@@ -72,10 +78,13 @@ class SPNClassifier(BaseEstimator, ClassifierMixin):
         self._spn = learn_classifier(
             train_data,
             ds_context=Context(parametric_types=parametric_types).add_domains(train_data),
-            spn_learn_wrapper=learn_parametric,
+            spn_learn_wrapper=partial(learn_parametric, min_instances_slice=self.min_instances_slice),
             label_idx=X.shape[1],
             cpus=self.n_jobs,
         )
+
+        # Obtain stats
+        self.stats = get_structure_stats_dict(self._spn)
 
         # If pre optimization hook has been defined, run now
         if self.tf_pre_optimization_hook:
@@ -90,6 +99,7 @@ class SPNClassifier(BaseEstimator, ClassifierMixin):
                 batch_size=self.tf_batch_size,
                 epochs=self.tf_n_epochs,
                 return_loss=True,
+                epoch_hook=self.tf_epoch_hook,
             )
 
         # If post optimization hook has been defined, run now

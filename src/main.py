@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, List
 import argparse
 from functools import partial
 import logging
@@ -24,7 +24,7 @@ from spn.algorithms.sklearn import SPNClassifier
 from spn.algorithms.LearningWrappers import learn_classifier, learn_parametric
 from spn.gpu.TensorFlow import add_node_to_tf_graph, optimize_tf
 from spn.io.plot.TreeVisualization import plot_spn
-from spn.structure.Base import Context, Sum, assign_ids, get_nodes_by_type, rebuild_scopes_bottom_up
+from spn.structure.Base import Context, Sum, assign_ids, get_nodes_by_type, rebuild_scopes_bottom_up, Node
 from spn.structure.leaves.parametric.Parametric import Categorical, Gaussian
 from spn.structure.leaves.parametric.Parametric import CategoricalDictionary
 
@@ -38,10 +38,13 @@ logging.basicConfig(
 K_TEST_VALUES = [2, 3, 4, 5, 8, 16, 32]
 K_DEFAULT = 4
 
+# Structure learning
+MIN_INSTANCES_SLICE = 25
+
 # Number of Tensorflow optimization epochs
-TF_N_EPOCHS = 100
+TF_N_EPOCHS = 250
 TF_LEARNING_RATE_VALUES = [2 ** (-i) for i in range(1, 10)]
-TF_LEARNING_RATE_DEFAULT = 0.01
+TF_LEARNING_RATE_DEFAULT = 0.05
 
 # Number of synthetic samples
 N_SYNTH_SAMPLES = 500
@@ -49,7 +52,7 @@ N_SYNTH_NFEAT_VALUES = [8, 64]
 N_SYNTH_PINF_VALUES = [0.25, 1.0]
 
 # Weight augmentation factors
-WAF_FACTORS = [0.1, 0.3, 0.5]
+WAF_FACTORS = [0.1, 0.5]
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +127,7 @@ def run_exp_maxout(X, y, maxout_transform_func):
             tf_optimizer=tf.train.AdamOptimizer(learning_rate=TF_LEARNING_RATE_DEFAULT),
             tf_n_epochs=n_epochs,
             tf_pre_optimization_hook=mohook(maxout_k=k, transform_func=maxout_transform_func),
-            min_instances_slice=int(X.shape[0]/10),
+            min_instances_slice=MIN_INSTANCES_SLICE,
         )
         train_score, test_score = evaluate_cv(spn_maxout, X, y)
         ks.append(k)
@@ -149,7 +152,7 @@ def load_iris_3d():
 
 def load_iris_2d():
     X, y = load_iris(return_X_y=True)
-    mask = (y == 1) | (y == 2)
+    mask = (y == 0) | (y == 1)
     X = X[mask]
     y = y[mask]
     return X, y
@@ -177,15 +180,27 @@ def store_results(dataset_name, exp_name, setup_name, column_names, data):
     np.savetxt(fname, data, delimiter=",", header=",".join(column_names))
 
 
-def generate_spn_plot(fname, X, y):
-    spn = SPNClassifier(min_instances_slice=int(X.shape[0]/10))
-    spn.fit(X, y)
-    plot_spn(spn._spn, file_name=fname)
+def gen_spn_plot_and_stats(fname, X, y):
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.33, random_state=42)
+    spn = SPNClassifier(min_instances_slice=MIN_INSTANCES_SLICE)
+    spn.fit(X_train, y_train)
+    with open("{}-stats.txt".format(fname), "w") as f:
+        # Print layers, nodes, edges
+        print(spn.stats)
+        for k in ["layers", "nodes", "edges"]:
+            f.write("{: <14}= {: >4}\n".format(k, spn.stats[k]))
+
+        # Print counts per type
+        for k, v in spn.stats["count_per_type"].items():
+            f.write("{: <14}= {: >4}\n".format(k.__name__, v))
+
+    if not args.skip_plots:
+        plot_spn(spn._spn, file_name="{}-plot.png".format(fname))
 
 
 def run_on_data(dataset_name, X, y):
     logger.info("Starting experiments on %s", dataset_name)
-    generate_spn_plot(fname=os.path.join(args.result_dir, "spn-{}.png".format(dataset_name)), X=X, y=y)
+    gen_spn_plot_and_stats(fname=os.path.join(args.result_dir, "spn-{}".format(dataset_name)), X=X, y=y)
 
     def run_sum_to_maxout(weight_augmentation_factor):
         # Run sum weight transformation experiment
@@ -195,7 +210,7 @@ def run_on_data(dataset_name, X, y):
             dataset_name=dataset_name,
             exp_name="auc-eval",
             setup_name="from-sum-weight-waf-{}".format(weight_augmentation_factor),
-            column_names=["k", "AUC"],
+            column_names=["k", "auc train", "auc test"],
             data=data,
         )
 
@@ -207,46 +222,104 @@ def run_on_data(dataset_name, X, y):
     ks, train_score, test_score = run_exp_maxout_random_init(X, y)
     data = np.c_[ks, train_score, test_score]
     store_results(
-        dataset_name=dataset_name, exp_name="auc-eval", setup_name="random-init", column_names=["k", "AUC"], data=data
+        dataset_name=dataset_name,
+        exp_name="auc-eval",
+        setup_name="random-init",
+        column_names=["k", "auc train", "auc test"],
+        data=data,
     )
 
 
+# class Result:
+
+#     def __init__(self):
+#         self.content = []
+
+#     def append(self, e):
+#         self.content.append(e)
+
+#     def __str__(self):
+#         return "Result(" + str(self.content) + ")"
+
+#     def __len__(self):
+#         return len(self.content)
+
 def run_loss_experiments(dataset_name, X, y):
     """Run the loss comparison experiments"""
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.33, random_state=42)
 
     def run(maxout_transform_func, tag):
         column_names = []
         losses = []
+        auc_train_list = []
+        auc_test_list = []
 
-        def add_loss(spn, label):
-            loss = spn.fit(X, y).loss
+        def add_loss(spn, label, hook_res):
+            spn.fit(X_train, y_train)
+            loss = spn.loss
             column_names.append(label)
             losses.append(loss)
+
+            assert len(hook_res) > 0, "Hook result was empty!"
+
+            auc_train_list.append([t[1] for t in hook_res])
+            auc_test_list.append([t[2] for t in hook_res])
+
+        hook_res = [] 
+        hook = create_epoch_auc_hook(X_train, y_train, X_test, y_test, hook_res)
 
         # SPN without maxout
         spn = SPNClassifier(
             tf_optimize_weights=True,
             tf_n_epochs=TF_N_EPOCHS,
             tf_optimizer=tf.train.AdamOptimizer(learning_rate=TF_LEARNING_RATE_DEFAULT),
-            min_instances_slice=int(X.shape[0]/10)
+            min_instances_slice=MIN_INSTANCES_SLICE,
+            tf_epoch_hook=hook,
         )
-        add_loss(spn, "maxout=False")
+        add_loss(spn, "maxout=False", hook_res)
 
         # SPN with different maxout values (random init)
         for k in K_TEST_VALUES:
+            hook_res = []
+            hook = create_epoch_auc_hook(X_train, y_train, X_test, y_test, hook_res)
             spn = SPNClassifier(
                 tf_optimize_weights=True,
                 tf_n_epochs=TF_N_EPOCHS,
                 tf_optimizer=tf.train.AdamOptimizer(learning_rate=TF_LEARNING_RATE_DEFAULT),
                 tf_pre_optimization_hook=mohook(maxout_k=k, transform_func=maxout_transform_func),
+                tf_epoch_hook=hook,
             )
-            add_loss(spn, "maxout=%s" % k)
+            add_loss(spn, "maxout=%s" % k, hook_res)
 
-        loss_data = np.array(losses).T
-        data = np.c_[range(TF_N_EPOCHS), loss_data]
+        # Collect auc data
+        auc_train_data = np.c_[range(TF_N_EPOCHS), np.array(auc_train_list).T]
+        auc_test_data = np.c_[range(TF_N_EPOCHS), np.array(auc_test_list).T]
+
+        # Collect loss data
+        loss_data = np.c_[range(TF_N_EPOCHS), np.array(losses).T]
         column_names = ["epoch"] + column_names
+
+        # Store results
         store_results(
-            dataset_name=dataset_name, exp_name="loss-eval", setup_name=tag, column_names=column_names, data=data
+            dataset_name=dataset_name,
+            exp_name="auc-epoch-eval",
+            setup_name=tag + "-train",
+            column_names=column_names,
+            data=auc_train_data,
+        )
+        store_results(
+            dataset_name=dataset_name,
+            exp_name="auc-epoch-eval",
+            setup_name=tag + "-test",
+            column_names=column_names,
+            data=auc_test_data,
+        )
+        store_results(
+            dataset_name=dataset_name,
+            exp_name="loss-epoch-eval",
+            setup_name=tag,
+            column_names=column_names,
+            data=loss_data,
         )
 
     run(sum_to_maxout_rand, tag="random-init")
@@ -271,7 +344,7 @@ def run_learning_rate_experiments(dataset_name, X, y):
             tf_optimize_weights=True,
             tf_n_epochs=TF_N_EPOCHS,
             tf_optimizer=tf.train.AdamOptimizer(learning_rate=TF_LEARNING_RATE_DEFAULT),
-            min_instances_slice=int(X.shape[0]/10)
+            min_instances_slice=MIN_INSTANCES_SLICE,
         )
         add_loss(spn, "maxout=False")
 
@@ -287,7 +360,7 @@ def run_learning_rate_experiments(dataset_name, X, y):
                 tf_n_epochs=TF_N_EPOCHS,
                 tf_optimizer=tf.train.AdamOptimizer(learning_rate=learning_rate),
                 tf_pre_optimization_hook=hook,
-                min_instances_slice=int(X.shape[0]/10)
+                min_instances_slice=MIN_INSTANCES_SLICE,
             )
             add_loss(spn, "lr=%s" % learning_rate)
 
@@ -354,9 +427,9 @@ def main_run_experiment(exp_method):
         exp_method(dataset_name="iris-2d", X=X, y=y)
 
         # Iris 3D
-        X, y = load_iris_3d()
-        logger.info(" -- Iris 3d --")
-        exp_method(dataset_name="iris-3d", X=X, y=y)
+        # X, y = load_iris_3d()
+        # logger.info(" -- Iris 3d --")
+        # exp_method(dataset_name="iris-3d", X=X, y=y)
 
         # Wine 2D
         X, y = load_wine_2d()
@@ -364,9 +437,9 @@ def main_run_experiment(exp_method):
         exp_method(dataset_name="wine-2d", X=X, y=y)
 
         # Wine 3D
-        X, y = load_wine_3d()
-        logger.info(" -- Wine 3d --")
-        exp_method(dataset_name="wine-3d", X=X, y=y)
+        # X, y = load_wine_3d()
+        # logger.info(" -- Wine 3d --")
+        # exp_method(dataset_name="wine-3d", X=X, y=y)
 
         # Audit
         X, y = load_audit()
@@ -374,14 +447,14 @@ def main_run_experiment(exp_method):
         exp_method(dataset_name="audit", X=X, y=y)
 
 
-
 def parse_args():
     """Parse arguments"""
     parser = argparse.ArgumentParser(description="SPFlow Maxout Experiments")
     parser.add_argument("--result-dir", default="results", help="path to the result directory", metavar="DIR")
-    parser.add_argument("--n-synth", "-ns", default=100, type=int, help="Number of synthetic samples")
     parser.add_argument("--debug", default=False, action="store_true")
     parser.add_argument("--synth-only", default=False, action="store_true")
+    parser.add_argument("--skip-plots", default=False, action="store_true")
+    parser.add_argument("--min-instances-slice", default=25, type=int)
     args = parser.parse_args()
 
     ensure_dir(args.result_dir)
@@ -395,6 +468,65 @@ def ensure_dir(d):
         os.makedirs(d)
 
 
+def main_structure_stats():
+    # Get data
+    X, y = sklearn.datasets.make_classification(
+        n_samples=N_SYNTH_SAMPLES,
+        n_features=16,
+        n_informative=16,
+        n_redundant=0,
+        n_classes=2,
+        n_clusters_per_class=2,
+        class_sep=1.0,
+        random_state=42,
+    )
+    # Create SPN structure with different min_instances_slice values
+    for mis in [10, 25, 50, 100]:
+        spn = SPNClassifier(min_instances_slice=mis)
+        spn.fit(X, y)
+        logger.info(
+            "min_instances_slice: %s, layers: %s, sum nodes: %s, total nodes: %s",
+            mis,
+            spn.stats["layers"],
+            spn.stats["count_per_type"][Sum],
+            spn.stats["nodes"],
+        )
+
+
+def spn_to_classifier(spn, X, y):
+    clf = SPNClassifier()
+    clf._spn = spn
+    clf.X_ = X
+    clf.y_ = y
+    return clf
+
+
+def create_epoch_auc_hook(
+    X_train: np.ndarray, y_train: np.ndarray, X_test: np.ndarray, y_test: np.ndarray, results_list: List
+):
+    """Create an epoch hook that collects train and test AUC scores in the returned list"""
+
+    def tf_auc_epoch_hook(epoch: int, train_loss: float, spn: Node):
+        """Epoch hook that collects AUC score on train and test set"""
+        clf = spn_to_classifier(spn, X_train, y_train)
+        y_train_pred = clf.predict(X_train)
+        y_test_pred = clf.predict(X_test)
+        auc_train = roc_auc_score(y_train, y_train_pred)
+        auc_test = roc_auc_score(y_test, y_test_pred)
+        results_list.append((epoch, auc_train, auc_test))
+
+    return tf_auc_epoch_hook
+
+
+def test_tf_cv():
+    X, y = load_iris_2d()
+    spn = SPNClassifier(n_jobs=1, tf_optimize_weights=True, tf_n_epochs=5)
+    scores = cross_val_score(spn, X, y, cv=5, verbose=10, n_jobs=4)
+    # ^ throws AssertionError: unnormalized weights [nan, nan] for node SumNode_0
+    # if n_jobs is more than 1
+    print(scores)
+
+
 if __name__ == "__main__":
     # Limit tf GPU usage
     np.random.seed(1)
@@ -402,7 +534,6 @@ if __name__ == "__main__":
     sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
 
     args = parse_args()
-    N_SYNTH_SAMPLES = args.n_synth
 
     # Reduce default values to something small when debugging
     if args.debug:
@@ -419,5 +550,5 @@ if __name__ == "__main__":
 
     # Start the three main experiments
     # main_learning_rate_experiments()
-    main_dataset_experiments()
     main_loss_experiments()
+    main_dataset_experiments()
