@@ -114,7 +114,6 @@ def maxout_log_likelihood(node: Maxout, children, data=None, dtype=np.float64) -
     """
     llchildren = np.concatenate(children, axis=1)
     assert llchildren.dtype == dtype
-
     assert_normalized_weights(node)
 
     # Simulate scipy.special.logsumexp for weight matrices
@@ -122,7 +121,6 @@ def maxout_log_likelihood(node: Maxout, children, data=None, dtype=np.float64) -
 
     # Choose the highest log likelihood
     maxlls = np.max(res, axis=1)
-
     return maxlls.reshape(-1, 1)
 
 

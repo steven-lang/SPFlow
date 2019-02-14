@@ -1,5 +1,4 @@
 import logging
-from functools import partial
 from typing import List
 
 import numpy as np
@@ -12,7 +11,7 @@ from spn.algorithms.LearningWrappers import learn_classifier, learn_parametric
 from spn.algorithms.MPE import mpe
 from spn.algorithms.Statistics import get_structure_stats_dict
 from spn.gpu.TensorFlow import optimize_tf
-from spn.structure.Base import Context, get_nodes_by_type
+from spn.structure.Base import Context
 from spn.structure.leaves.parametric.Parametric import Categorical, Gaussian, Parametric
 
 logger = logging.getLogger(__name__)
@@ -20,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 class SPNClassifier(BaseEstimator, ClassifierMixin):
     """
-    SPNClassifier wraps the SPN structure learning, tensorflow weight optimization and MPE procedures into a single 
-    class that follows the sklearn estimator interace. Therefore, SPNClassifier is usable in the sklearn framework as 
+    SPNClassifier wraps the SPN structure learning, tensorflow weight optimization and MPE procedures into a single
+    class that follows the sklearn estimator interace. Therefore, SPNClassifier is usable in the sklearn framework as
     estimator in cross_val_score, GridSearchCV and more.
     """
 
@@ -78,9 +77,10 @@ class SPNClassifier(BaseEstimator, ClassifierMixin):
         self._spn = learn_classifier(
             train_data,
             ds_context=Context(parametric_types=parametric_types).add_domains(train_data),
-            spn_learn_wrapper=partial(learn_parametric, min_instances_slice=self.min_instances_slice),
+            spn_learn_wrapper=learn_parametric,
             label_idx=X.shape[1],
             cpus=self.n_jobs,
+            min_instances_slice=self.min_instances_slice,
         )
 
         # Obtain stats
@@ -106,6 +106,9 @@ class SPNClassifier(BaseEstimator, ClassifierMixin):
         if self.tf_post_optimization_hook:
             self._spn = self.tf_post_optimization_hook(self._spn)
 
+        # # Compute marginalized spn
+        # self._spn_marg = marginalize(self._spn, [X.shape[1]])
+
         self.X_ = X
         self.y_ = y
 
@@ -127,6 +130,29 @@ class SPNClassifier(BaseEstimator, ClassifierMixin):
         y_pred = data_filled[:, -1]
 
         return y_pred
+
+    # def predict_proba(self, X):
+    #     # Check is fit had been called
+    #     check_is_fitted(self, ["X_", "y_"])
+
+    #     # Input validation
+    #     X = check_array(X)
+
+    #     # Classify
+    #     n_test = X.shape[0]
+    #     y_0 = np.full((n_test, 1), fill_value=0)
+    #     y_1 = np.full((n_test, 1), fill_value=1)
+    #     data_0 = np.c_[X, y_0]
+    #     data_1 = np.c_[X, y_1]
+    #     data_0 = data_0.astype(np.float64)
+    #     data_1 = data_1.astype(np.float64)
+
+    #     ll_0 = np.exp(log_likelihood(self._spn, data_0))
+    #     ll_1 = np.exp(log_likelihood(self._spn, data_1))
+
+    #     y_probas = np.c_[ll_0, ll_1]
+    #     y_probas /= np.sum(y_probas, axis=1)[:, np.newaxis]
+    #     return y_probas
 
     def get_params(self, deep=True):
         """Method to make SPNClassifier usable in sklearn procedures such as cross_val_score etc."""
@@ -167,7 +193,7 @@ def classification_categorical_to_tf_graph(
         p = np.array(node.p, dtype=dtype)
 
         # Epsilon to make sure there are no zero values
-        eps = 1e-20
+        eps = 1e-9
         p += eps
 
         # Renormalize such that the sum over all probabilities is one
